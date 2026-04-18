@@ -7,7 +7,7 @@ import altair as alt
 from datetime import datetime, timedelta
 
 # Configuración de la página
-st.set_page_config(page_title="Predicción de Consumo Eléctrico - LSTM", layout="wide")
+st.set_page_config(page_title="Predicción de Demanda - LSTM", layout="wide")
 
 # Definición del modelo LSTM
 class LSTMPredictor(nn.Module):
