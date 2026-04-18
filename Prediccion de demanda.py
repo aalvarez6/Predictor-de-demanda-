@@ -7,18 +7,11 @@ import altair as alt
 from datetime import datetime, timedelta
 import io
 
-# Verificar / instalar openpyxl automáticamente
-import subprocess, sys  # noqa: E401
 try:
     import openpyxl  # noqa: F401
     _OPENPYXL_OK = True
 except ImportError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl", "--quiet"])
-    try:
-        import openpyxl  # noqa: F401
-        _OPENPYXL_OK = True
-    except ImportError:
-        _OPENPYXL_OK = False
+    _OPENPYXL_OK = False
 
 # ─── Configuración de página ───────────────────────────────────────────────────
 st.set_page_config(
