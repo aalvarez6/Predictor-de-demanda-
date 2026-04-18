@@ -157,7 +157,8 @@ def load_data(file, sheet_name=None):
             return None
 
         df = df.rename(columns={time_col: "Datetime"})
-        df["Datetime"] = pd.to_datetime(df["Datetime"])
+        df["Datetime"] = df["Datetime"].astype(str).str.split().str[:2].str.join(" ")
+        df["Datetime"] = pd.to_datetime(df["Datetime"], errors="coerce")
 
         # ── Detectar columna de consumo ────────────────────────────────────
         value_col = None
