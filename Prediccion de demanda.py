@@ -7,6 +7,19 @@ import altair as alt
 from datetime import datetime, timedelta
 import io
 
+# Verificar / instalar openpyxl automáticamente
+import subprocess, sys  # noqa: E401
+try:
+    import openpyxl  # noqa: F401
+    _OPENPYXL_OK = True
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl", "--quiet"])
+    try:
+        import openpyxl  # noqa: F401
+        _OPENPYXL_OK = True
+    except ImportError:
+        _OPENPYXL_OK = False
+
 # ─── Configuración de página ───────────────────────────────────────────────────
 st.set_page_config(
     page_title="Predicción de Demanda — Series Temporales",
@@ -107,10 +120,29 @@ def load_data(file, sheet_name=None):
     """Carga CSV o XLSX. Busca columna de tiempo y columna numérica de consumo."""
     try:
         fname = file.name.lower()
-        if fname.endswith(".xlsx") or fname.endswith(".xls"):
-            df = pd.read_excel(file, sheet_name=sheet_name or 0)
+        is_excel = fname.endswith(".xlsx") or fname.endswith(".xls")
+
+        if is_excel:
+            if not _OPENPYXL_OK:
+                st.error("Falta la librería **openpyxl**. Instálala con: `pip install openpyxl`")
+                return None
+            # Leer el contenido completo en memoria para evitar errores de buffer/stream
+            raw_bytes = file.read()
+            buf = io.BytesIO(raw_bytes)
+            engine = "openpyxl" if fname.endswith(".xlsx") else "xlrd"
+            try:
+                df = pd.read_excel(buf, sheet_name=sheet_name or 0, engine=engine)
+            except Exception as e_excel:
+                st.error(f"No se pudo leer el archivo Excel: {e_excel}")
+                st.info("Intenta guardar el archivo como **CSV** (UTF-8) desde Excel y cárgalo de nuevo.")
+                return None
         else:
-            df = pd.read_csv(file)
+            raw_bytes = file.read()
+            buf = io.BytesIO(raw_bytes)
+            # Detectar separador automáticamente
+            sample = raw_bytes[:2048].decode("utf-8", errors="replace")
+            sep = ";" if sample.count(";") > sample.count(",") else ","
+            df = pd.read_csv(buf, sep=sep)
 
         # ── Detectar columna de tiempo ──────────────────────────────────────
         time_col = None
@@ -146,7 +178,7 @@ def load_data(file, sheet_name=None):
                 value_col = numeric_cols[0]
                 st.info(f"Se usará la columna numérica: **{value_col}**")
             else:
-                st.error("No se encontró columna numérica de consumo.")
+                st.error(f"No se encontró columna numérica de consumo. Columnas disponibles: {list(df.columns)}")
                 return None
 
         df = df.rename(columns={value_col: "Kwh"})
@@ -155,6 +187,11 @@ def load_data(file, sheet_name=None):
 
     except Exception as e:
         st.error(f"Error al cargar los datos: {e}")
+        st.info("💡 **Pistas para resolver el error:**\n"
+                "- Asegúrate de que el archivo no esté abierto en Excel al mismo tiempo\n"
+                "- Intenta exportar desde Excel como **CSV UTF-8** y carga ese archivo\n"
+                "- Verifica que el archivo no esté protegido con contraseña\n"
+                "- El archivo debe tener al menos una columna de fecha y una numérica")
         return None
 
 
@@ -516,6 +553,21 @@ st.caption("Explorador  ·  Constructor  ·  Arquitecto")
 st.sidebar.header("📁 Datos")
 uploaded_file = st.sidebar.file_uploader("Cargar archivo (CSV o XLSX)", type=["csv", "xlsx", "xls"])
 
+# Selector de hoja para XLSX
+sheet_name = None
+if uploaded_file is not None and uploaded_file.name.lower().endswith((".xlsx", ".xls")):
+    try:
+        raw = uploaded_file.read()
+        uploaded_file.seek(0)  # resetear el cursor
+        xf = pd.ExcelFile(io.BytesIO(raw), engine="openpyxl")
+        sheets = xf.sheet_names
+        if len(sheets) > 1:
+            sheet_name = st.sidebar.selectbox("Hoja del archivo Excel", sheets)
+        else:
+            sheet_name = sheets[0]
+    except Exception:
+        sheet_name = 0
+
 # Nivel activo
 nivel = st.sidebar.radio("Nivel de análisis", ["Nivel 1 — Explorador", "Nivel 2 — Constructor", "Nivel 3 — Arquitecto"])
 
@@ -547,9 +599,32 @@ if uploaded_file is None:
     st.stop()
 
 # ── Carga ──────────────────────────────────────────────────────────────────
-df = load_data(uploaded_file)
+df = load_data(uploaded_file, sheet_name=sheet_name)
 if df is None:
-    st.stop()
+    # Último recurso: selector manual de columnas
+    st.warning("Selección manual de columnas:")
+    try:
+        uploaded_file.seek(0)
+        raw2 = uploaded_file.read()
+        fname2 = uploaded_file.name.lower()
+        if fname2.endswith((".xlsx", ".xls")):
+            df_raw = pd.read_excel(io.BytesIO(raw2), sheet_name=sheet_name or 0, engine="openpyxl")
+        else:
+            df_raw = pd.read_csv(io.BytesIO(raw2))
+        st.dataframe(df_raw.head(5), use_container_width=True)
+        cols = list(df_raw.columns)
+        col_time = st.selectbox("Columna de fecha/tiempo", cols, key="manual_time")
+        col_val  = st.selectbox("Columna de consumo (numérica)", cols, key="manual_val")
+        if st.button("Aplicar selección manual"):
+            df_raw = df_raw.rename(columns={col_time: "Datetime", col_val: "Kwh"})
+            df_raw["Datetime"] = pd.to_datetime(df_raw["Datetime"])
+            df = df_raw[["Datetime", "Kwh"]].dropna().sort_values("Datetime").reset_index(drop=True)
+            st.success(f"Cargados {len(df):,} registros correctamente.")
+        else:
+            st.stop()
+    except Exception as e2:
+        st.error(f"No se pudo leer el archivo: {e2}")
+        st.stop()
 
 st.success(f"✅ Dataset cargado: **{len(df):,} registros** | {df['Datetime'].min().date()} → {df['Datetime'].max().date()}")
 with st.expander("Vista previa de los datos"):
