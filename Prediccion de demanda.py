@@ -4,7 +4,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import altair as alt
-from datetime import datetime, timedelta
 import io
 
 try:
@@ -13,46 +12,24 @@ try:
 except ImportError:
     _OPENPYXL_OK = False
 
-# ─── Configuración de página ───────────────────────────────────────────────────
-st.set_page_config(
-    page_title="Predicción de Demanda — Series Temporales",
-    page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+# ══════════════════════════════════════════════════════════════════════════════
+st.set_page_config(page_title="Predicción de Demanda", page_icon="📦", layout="wide")
 
-# ─── CSS personalizado ─────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
-
-html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
-h1, h2, h3 { font-family: 'IBM Plex Mono', monospace; }
-
-.level-badge {
-    display: inline-block;
-    padding: 4px 14px;
-    border-radius: 4px;
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 0.75rem;
-    font-weight: 600;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    margin-bottom: 8px;
-}
-.badge-1 { background: #0e4f3a; color: #4fffb0; border: 1px solid #4fffb0; }
-.badge-2 { background: #1a2f5e; color: #5eb3ff; border: 1px solid #5eb3ff; }
-.badge-3 { background: #3d1a5e; color: #c97bff; border: 1px solid #c97bff; }
-
-.metric-card {
-    background: #111827;
-    border: 1px solid #374151;
-    border-radius: 8px;
-    padding: 16px 20px;
-    margin: 4px 0;
-}
-.metric-label { color: #9ca3af; font-size: 0.78rem; font-family: 'IBM Plex Mono', monospace; text-transform: uppercase; }
-.metric-value { color: #f9fafb; font-size: 1.5rem; font-family: 'IBM Plex Mono', monospace; font-weight: 600; }
+html, body, [class*="css"]  { font-family: 'IBM Plex Sans', sans-serif; }
+h1,h2,h3                    { font-family: 'IBM Plex Mono', monospace; }
+.badge { display:inline-block; padding:3px 12px; border-radius:4px;
+         font-family:'IBM Plex Mono',monospace; font-size:.72rem;
+         font-weight:600; letter-spacing:.07em; text-transform:uppercase; margin-bottom:6px; }
+.b1 { background:#0e4f3a; color:#4fffb0; border:1px solid #4fffb0; }
+.b2 { background:#1a2f5e; color:#5eb3ff; border:1px solid #5eb3ff; }
+.b3 { background:#3d1a5e; color:#c97bff; border:1px solid #c97bff; }
+.kpi { background:#111827; border:1px solid #374151; border-radius:8px;
+       padding:14px 18px; margin:3px 0; }
+.kpi-label { color:#9ca3af; font-size:.72rem; font-family:'IBM Plex Mono',monospace; text-transform:uppercase; }
+.kpi-value { color:#f9fafb; font-size:1.4rem; font-family:'IBM Plex Mono',monospace; font-weight:600; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -61,599 +38,516 @@ h1, h2, h3 { font-family: 'IBM Plex Mono', monospace; }
 # MODELO LSTM
 # ══════════════════════════════════════════════════════════════════════════════
 class LSTMPredictor(nn.Module):
-    def __init__(self, input_size=1, hidden_size=50, num_layers=2):
+    def __init__(self, hidden_size=50, num_layers=2):
         super().__init__()
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
-        self.fc = nn.Linear(hidden_size, 1)
-
+        self.lstm = nn.LSTM(1, hidden_size, num_layers, batch_first=True)
+        self.fc   = nn.Linear(hidden_size, 1)
+        self.h    = hidden_size
+        self.nl   = num_layers
     def forward(self, x):
-        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size)
-        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size)
+        h0 = torch.zeros(self.nl, x.size(0), self.h)
+        c0 = torch.zeros(self.nl, x.size(0), self.h)
         out, _ = self.lstm(x, (h0, c0))
         return self.fc(out[:, -1, :])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# FUNCIONES UTILITARIAS
+# UTILIDADES
 # ══════════════════════════════════════════════════════════════════════════════
-def normalize_data(data):
-    mean, std = np.mean(data), np.std(data)
-    std = std if std != 0 else 1
-    return (data - mean) / std, mean, std
+def norm(arr):
+    m, s = arr.mean(), arr.std()
+    s = s if s else 1
+    return (arr - m) / s, m, s
 
-def denormalize_data(data, mean, std):
-    return data * std + mean
+def denorm(arr, m, s):
+    return arr * s + m
 
-def create_sequences(data, seq_length):
-    sequences, targets = [], []
-    for i in range(len(data) - seq_length):
-        sequences.append(data[i:i + seq_length])
-        targets.append(data[i + seq_length])
-    return np.array(sequences), np.array(targets)
+def make_seq(arr, L):
+    X, y = [], []
+    for i in range(len(arr) - L):
+        X.append(arr[i:i+L])
+        y.append(arr[i+L])
+    return np.array(X), np.array(y)
 
-def predict_future(model, last_sequence, n_steps, mean, std):
+def forecast_lstm(model, seq, n, m, s):
     model.eval()
-    predictions = []
-    current_sequence = last_sequence.clone()
+    preds = []
+    cur = seq.clone()
     with torch.no_grad():
-        for _ in range(n_steps):
-            x = current_sequence.view(1, -1, 1)
-            output = model(x)
-            predictions.append(output.item())
-            current_sequence = torch.cat((current_sequence[1:], output.view(1, 1)), 0)
-    return denormalize_data(np.array(predictions), mean, std)
+        for _ in range(n):
+            out = model(cur.view(1, -1, 1))
+            preds.append(out.item())
+            cur = torch.cat((cur[1:], out.view(1, 1)), 0)
+    return denorm(np.array(preds), m, s)
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# CARGA DE DATOS (CSV y XLSX)
-# ──────────────────────────────────────────────────────────────────────────────
-def load_data(file, sheet_name=None):
-    """Carga CSV o XLSX. Busca columna de tiempo y columna numérica de consumo."""
-    try:
-        fname = file.name.lower()
-        is_excel = fname.endswith(".xlsx") or fname.endswith(".xls")
-
-        if is_excel:
-            if not _OPENPYXL_OK:
-                st.error("Falta la librería **openpyxl**. Instálala con: `pip install openpyxl`")
-                return None
-            # Leer el contenido completo en memoria para evitar errores de buffer/stream
-            raw_bytes = file.read()
-            buf = io.BytesIO(raw_bytes)
-            engine = "openpyxl" if fname.endswith(".xlsx") else "xlrd"
-            try:
-                df = pd.read_excel(buf, sheet_name=sheet_name or 0, engine=engine)
-            except Exception as e_excel:
-                st.error(f"No se pudo leer el archivo Excel: {e_excel}")
-                st.info("Intenta guardar el archivo como **CSV** (UTF-8) desde Excel y cárgalo de nuevo.")
-                return None
-        else:
-            raw_bytes = file.read()
-            buf = io.BytesIO(raw_bytes)
-            # Detectar separador automáticamente
-            sample = raw_bytes[:2048].decode("utf-8", errors="replace")
-            sep = ";" if sample.count(";") > sample.count(",") else ","
-            df = pd.read_csv(buf, sep=sep)
-
-        # ── Detectar columna de tiempo ──────────────────────────────────────
-        time_col = None
-        for candidate in ["Datetime", "Time", "datetime", "time", "Fecha", "fecha", "Date", "date", "timestamp"]:
-            if candidate in df.columns:
-                time_col = candidate
-                break
-        if time_col is None:
-            # intentar detectar automáticamente la primera columna parseable como fecha
-            for col in df.columns:
-                try:
-                    pd.to_datetime(df[col].dropna().iloc[:3])
-                    time_col = col
-                    break
-                except Exception:
-                    pass
-        if time_col is None:
-            st.error("No se encontró columna de fecha/tiempo. Asegúrate de tener una columna 'Datetime', 'Time', 'Fecha' o similar.")
-            return None
-
-        df = df.rename(columns={time_col: "Datetime"})
-        df["Datetime"] = df["Datetime"].astype(str).str.split().str[:2].str.join(" ")
-        df["Datetime"] = pd.to_datetime(df["Datetime"], errors="coerce")
-
-        # ── Detectar columna de consumo ────────────────────────────────────
-        value_col = None
-        for candidate in ["Kwh", "kwh", "KWH", "Consumo", "consumo", "Value", "value", "Demand", "demand", "MW", "kW"]:
-            if candidate in df.columns:
-                value_col = candidate
-                break
-        if value_col is None:
-            numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-            if numeric_cols:
-                value_col = numeric_cols[0]
-                st.info(f"Se usará la columna numérica: **{value_col}**")
-            else:
-                st.error(f"No se encontró columna numérica de consumo. Columnas disponibles: {list(df.columns)}")
-                return None
-
-        df = df.rename(columns={value_col: "Kwh"})
-        df = df[["Datetime", "Kwh"]].dropna().sort_values("Datetime").reset_index(drop=True)
-        return df
-
-    except Exception as e:
-        st.error(f"Error al cargar los datos: {e}")
-        st.info("💡 **Pistas para resolver el error:**\n"
-                "- Asegúrate de que el archivo no esté abierto en Excel al mismo tiempo\n"
-                "- Intenta exportar desde Excel como **CSV UTF-8** y carga ese archivo\n"
-                "- Verifica que el archivo no esté protegido con contraseña\n"
-                "- El archivo debe tener al menos una columna de fecha y una numérica")
-        return None
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# NIVEL 1 — EXPLORADOR: Limpieza y EDA
-# ══════════════════════════════════════════════════════════════════════════════
-def nivel_1(df):
-    st.markdown('<span class="level-badge badge-1">Nivel 1 — Explorador</span>', unsafe_allow_html=True)
-    st.markdown("### 🔍 Análisis Exploratorio y Limpieza")
-
-    col1, col2 = st.columns(2)
-
-    # ── 1. NaN y Outliers ──────────────────────────────────────────────────
-    n_nan = df["Kwh"].isna().sum()
-    q1, q3 = df["Kwh"].quantile(0.25), df["Kwh"].quantile(0.75)
-    iqr = q3 - q1
-    n_outliers = ((df["Kwh"] < q1 - 1.5 * iqr) | (df["Kwh"] > q3 + 1.5 * iqr)).sum()
-
-    with col1:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">Total registros</div>
-            <div class="metric-value">{len(df):,}</div>
-        </div>
-        <div class="metric-card">
-            <div class="metric-label">NaN detectados</div>
-            <div class="metric-value">{n_nan}</div>
-        </div>
-        <div class="metric-card">
-            <div class="metric-label">Outliers (IQR)</div>
-            <div class="metric-value">{n_outliers}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    # ── 2. Imputación ──────────────────────────────────────────────────────
-    impute_method = st.selectbox(
-        "Método de imputación",
-        ["Forward Fill", "Media simple", "Mediana", "Interpolación lineal"],
-        key="impute_method"
-    )
-
-    df_clean = df.copy()
-    if impute_method == "Forward Fill":
-        df_clean["Kwh"] = df_clean["Kwh"].ffill()
-    elif impute_method == "Media simple":
-        df_clean["Kwh"] = df_clean["Kwh"].fillna(df_clean["Kwh"].mean())
-    elif impute_method == "Mediana":
-        df_clean["Kwh"] = df_clean["Kwh"].fillna(df_clean["Kwh"].median())
-    else:
-        df_clean["Kwh"] = df_clean["Kwh"].interpolate()
-
-    with col2:
-        mean_val = df_clean["Kwh"].mean()
-        std_val = df_clean["Kwh"].std()
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">Media (limpio)</div>
-            <div class="metric-value">{mean_val:.3f} kWh</div>
-        </div>
-        <div class="metric-card">
-            <div class="metric-label">Desviación estándar</div>
-            <div class="metric-value">{std_val:.3f} kWh</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    # ── 3. Gráfica Original vs Limpia ─────────────────────────────────────
-    orig = df[["Datetime", "Kwh"]].copy(); orig["Serie"] = "Original"
-    clean = df_clean[["Datetime", "Kwh"]].copy(); clean["Serie"] = "Limpia"
-    combined = pd.concat([orig, clean])
-
-    chart = alt.Chart(combined).mark_line(opacity=0.85).encode(
-        x=alt.X("Datetime:T", title="Fecha"),
-        y=alt.Y("Kwh:Q", title="Consumo (kWh)"),
-        color=alt.Color("Serie:N", scale=alt.Scale(
-            domain=["Original", "Limpia"],
-            range=["#4b5563", "#4fffb0"]
-        )),
-        strokeDash=alt.StrokeDash("Serie:N", scale=alt.Scale(
-            domain=["Original", "Limpia"],
-            range=[[4, 4], [0]]
-        ))
-    ).properties(height=300).interactive()
-
-    st.altair_chart(chart, use_container_width=True)
-    return df_clean
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# NIVEL 2 — CONSTRUCTOR: Modelos estadísticos + Forecast
-# ══════════════════════════════════════════════════════════════════════════════
-def nivel_2(df_clean, forecast_weeks):
-    st.markdown('<span class="level-badge badge-2">Nivel 2 — Constructor</span>', unsafe_allow_html=True)
-    st.markdown("### 📐 Modelos Estadísticos + Forecast con IC 90%")
-
-    data = df_clean["Kwh"].values
-    n = len(data)
-    if n < 2:
-        st.warning("No hay suficientes datos."); return None, None
-
-    # ── Holt-Winters simplificado (tendencia + estacionalidad) ─────────────
-    alpha, beta, gamma = 0.3, 0.1, 0.2
-    period = 52  # anual en semanas
-
-    # Inicializar
-    level = np.mean(data[:period]) if n >= period else np.mean(data)
-    trend = (np.mean(data[period:2*period]) - np.mean(data[:period])) / period if n >= 2*period else 0
-    seasonal = np.zeros(period)
-    if n >= period:
-        for i in range(period):
-            seasonal[i] = data[i] - level
-
+def holt_winters(arr, alpha=.3, beta=.1, gamma=.2, period=52):
+    n = len(arr)
+    lv  = arr[:period].mean() if n >= period else arr.mean()
+    tr  = ((arr[period:2*period].mean() - arr[:period].mean()) / period
+           if n >= 2*period else 0.0)
+    sea = (arr[:period] - lv).copy() if n >= period else np.zeros(period)
     fitted = np.zeros(n)
     for t in range(n):
-        s_idx = t % period
-        if t == 0:
-            fitted[t] = level + trend + seasonal[s_idx]
-        else:
-            prev_level = level
-            fitted[t] = level + trend + seasonal[s_idx]
-            if n > period and t >= period:
-                level_new = alpha * (data[t] - seasonal[s_idx]) + (1 - alpha) * (prev_level + trend)
-                trend = beta * (level_new - prev_level) + (1 - beta) * trend
-                seasonal[s_idx] = gamma * (data[t] - level_new) + (1 - gamma) * seasonal[s_idx]
-                level = level_new
+        s = t % period
+        fitted[t] = lv + tr + sea[s]
+        if n > period and t >= period:
+            lv_prev = lv
+            lv  = alpha * (arr[t] - sea[s]) + (1 - alpha) * (lv + tr)
+            tr  = beta  * (lv - lv_prev)    + (1 - beta)  * tr
+            sea[s] = gamma * (arr[t] - lv)  + (1 - gamma) * sea[s]
+    return fitted, lv, tr, sea
 
-    residuals = data - fitted
-    mae = np.mean(np.abs(residuals))
-    mape = np.mean(np.abs(residuals / (data + 1e-9))) * 100
+def future_hw(lv, tr, sea, n, period=52):
+    return np.array([lv + tr + sea[i % period] for i in range(n)])
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">MAE (Holt-Winters)</div>
-            <div class="metric-value">{mae:.3f}</div>
-        </div>
-        """, unsafe_allow_html=True)
-    with col2:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">MAPE (Holt-Winters)</div>
-            <div class="metric-value">{mape:.2f}%</div>
-        </div>
-        """, unsafe_allow_html=True)
+def detect_anomalies(series, dates):
+    q1, q3 = np.percentile(series, 25), np.percentile(series, 75)
+    iqr = q3 - q1
+    lo, hi = q1 - 1.5*iqr, q3 + 1.5*iqr
+    mask = (series < lo) | (series > hi)
+    df = pd.DataFrame({
+        "Semana":          pd.to_datetime(dates[mask]).strftime("%Y-%m-%d"),
+        "Tipo de semana":  np.where(series[mask] < lo, "🔴 Valor bajo", "🟡 Valor alto"),
+        "Valor original":  series[mask].round(2),
+        "Límite inferior": round(lo, 2),
+        "Límite superior": round(hi, 2),
+    })
+    return df, lo, hi
 
-    # ── Forecast con IC 90% ───────────────────────────────────────────────
-    n_steps = forecast_weeks
-    std_resid = np.std(residuals)
-    z90 = 1.645
+def parse_fecha(col):
+    """Corrige fechas duplicadas tipo '2014-01-06 2014-01-06' y parsea."""
+    col = col.astype(str).str.strip()
+    col = col.str.extract(r'^(\d{4}-\d{2}-\d{2})', expand=False).fillna(col)
+    return pd.to_datetime(col, errors="coerce")
 
-    future_preds = []
-    fut_level, fut_trend = level, trend
-    fut_seasonal = seasonal.copy()
-    for i in range(n_steps):
-        s_idx = (n + i) % period
-        val = fut_level + fut_trend + fut_seasonal[s_idx]
-        future_preds.append(val)
+@st.cache_data(show_spinner="Leyendo archivo…")
+def load_raw(file_bytes, fname, sheet):
+    if fname.endswith((".xlsx", ".xls")):
+        if not _OPENPYXL_OK:
+            return None, "Falta openpyxl en requirements.txt"
+        df = pd.read_excel(io.BytesIO(file_bytes), sheet_name=sheet, engine="openpyxl")
+    else:
+        sample = file_bytes[:2048].decode("utf-8", errors="replace")
+        sep = ";" if sample.count(";") > sample.count(",") else ","
+        df = pd.read_csv(io.BytesIO(file_bytes), sep=sep)
+    return df, None
 
-    future_preds = np.array(future_preds)
-    ic_low = future_preds - z90 * std_resid
-    ic_high = future_preds + z90 * std_resid
+def build_ts(df, col_fecha, col_valor, col_sku, sku_sel):
+    tmp = df.copy()
+    tmp["_fecha"] = parse_fecha(tmp[col_fecha])
+    tmp["_valor"] = pd.to_numeric(tmp[col_valor], errors="coerce")
+    if col_sku and sku_sel != "__TODOS__":
+        tmp = tmp[tmp[col_sku] == sku_sel]
+    tmp = tmp.dropna(subset=["_fecha", "_valor"])
+    tmp = tmp[tmp["_valor"] >= 0]
+    weekly = (tmp.groupby(pd.Grouper(key="_fecha", freq="W"))["_valor"]
+                 .sum().reset_index()
+                 .rename(columns={"_fecha": "Fecha", "_valor": "Demanda"}))
+    return weekly[weekly["Demanda"] > 0].reset_index(drop=True)
 
-    last_date = df_clean["Datetime"].iloc[-1]
-    freq = pd.infer_freq(df_clean["Datetime"]) or "W"
-    future_dates = pd.date_range(start=last_date, periods=n_steps + 1, freq=freq)[1:]
+def kpi(label, value):
+    return f'<div class="kpi"><div class="kpi-label">{label}</div><div class="kpi-value">{value}</div></div>'
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SIDEBAR
+# ══════════════════════════════════════════════════════════════════════════════
+st.title("📦 Predicción de Demanda — Series Temporales")
+st.caption("Explorador · Constructor · Arquitecto")
+
+with st.sidebar:
+    st.header("📁 Datos")
+    uploaded = st.file_uploader("CSV o XLSX", type=["csv","xlsx","xls"])
+
+    sheet = 0
+    if uploaded and uploaded.name.lower().endswith((".xlsx",".xls")):
+        try:
+            raw_peek = uploaded.read()
+            uploaded.seek(0)
+            xf = pd.ExcelFile(io.BytesIO(raw_peek), engine="openpyxl")
+            sheet = st.selectbox("Hoja Excel", xf.sheet_names) if len(xf.sheet_names) > 1 else xf.sheet_names[0]
+        except Exception:
+            sheet = 0
+
+    nivel = st.radio("Nivel de análisis",
+                     ["1 — Explorador", "2 — Constructor", "3 — Arquitecto"])
+    st.markdown("---")
+    st.header("⚙️ Parámetros")
+    forecast_n  = st.slider("Semanas a predecir",      4,  52, 12)
+    seq_length  = st.slider("Secuencia LSTM",           4,  52, 12)
+    hidden_size = st.slider("Neuronas ocultas",        10, 150, 50)
+    epochs      = st.slider("Épocas entrenamiento",    10, 200, 60)
+    run_btn     = st.button("🚀 Ejecutar análisis", type="primary")
+    st.markdown("""---
+**Niveles**
+- 🟢 **1** EDA, limpieza, imputación
+- 🔵 **2** Holt-Winters, IC 90%, residuos
+- 🟣 **3** LSTM, comparación, anomalías""")
+
+
+# ── Sin archivo ───────────────────────────────────────────────────────────────
+if not uploaded:
+    st.info("👆 Carga un archivo CSV o XLSX para comenzar.")
+    st.markdown("""
+**Columnas esperadas (nombres flexibles):**
+
+| fecha | sku | producto | unidades_vendid | nota |
+|---|---|---|---|---|
+| 2014-01-06 | SKU-001 | Arroz_500g | 754.8 | ok |
+
+*Las fechas duplicadas `2014-01-06 2014-01-06` se corrigen automáticamente.*
+""")
+    st.stop()
+
+
+# ── Cargar archivo ────────────────────────────────────────────────────────────
+raw_bytes = uploaded.read()
+uploaded.seek(0)
+df_raw, err = load_raw(raw_bytes, uploaded.name.lower(), sheet)
+if err:
+    st.error(err)
+    st.stop()
+
+cols = list(df_raw.columns)
+
+# ── Mapeo de columnas ─────────────────────────────────────────────────────────
+def pick(candidates):
+    for c in candidates:
+        for col in cols:
+            if col.lower().strip() == c:
+                return col
+    return cols[0]
+
+with st.expander("🗂️ Vista previa y mapeo de columnas", expanded=True):
+    st.dataframe(df_raw.head(8), use_container_width=True)
+    c1, c2, c3 = st.columns(3)
+    col_fecha = c1.selectbox("Columna fecha",
+        cols, index=cols.index(pick(["fecha","datetime","date","time"])))
+    col_valor = c2.selectbox("Columna demanda (numérica)",
+        cols, index=cols.index(pick(["unidades_vendid","unidades","kwh","value","demand","consumo","ventas"])))
+    col_sku_opt = ["(ninguna)"] + cols
+    col_sku   = c3.selectbox("Columna SKU / agrupación", col_sku_opt, index=0)
+
+col_sku_real = None if col_sku == "(ninguna)" else col_sku
+
+# ── Selector de SKU ───────────────────────────────────────────────────────────
+sku_sel = "__TODOS__"
+if col_sku_real:
+    skus = sorted(df_raw[col_sku_real].dropna().unique().tolist())
+    sku_sel = st.sidebar.selectbox(
+        "SKU a analizar", ["__TODOS__"] + skus,
+        format_func=lambda x: "Todos los SKUs" if x == "__TODOS__" else x)
+
+
+# ── Construir serie temporal ──────────────────────────────────────────────────
+try:
+    ts = build_ts(df_raw, col_fecha, col_valor, col_sku_real, sku_sel)
+except Exception as e:
+    st.error(f"Error construyendo la serie: {e}")
+    st.stop()
+
+if len(ts) < 8:
+    st.warning(f"Solo {len(ts)} semanas disponibles tras el filtrado. Necesitas al menos 8.")
+    st.stop()
+
+st.success(f"✅ **{len(ts)} semanas** | {ts['Fecha'].min().date()} → {ts['Fecha'].max().date()} | SKU: {sku_sel}")
+
+
+# ── Dashboard exploratorio rápido (siempre visible antes de ejecutar) ─────────
+st.subheader("📊 Dashboard Exploratorio")
+c1, c2, c3, c4 = st.columns(4)
+c1.markdown(kpi("Total semanas",   len(ts)), unsafe_allow_html=True)
+c2.markdown(kpi("Media semanal",   f"{ts['Demanda'].mean():.1f}"), unsafe_allow_html=True)
+c3.markdown(kpi("Máximo",          f"{ts['Demanda'].max():.1f}"), unsafe_allow_html=True)
+c4.markdown(kpi("Mínimo",          f"{ts['Demanda'].min():.1f}"), unsafe_allow_html=True)
+
+area = alt.Chart(ts).mark_area(
+    line={"color":"#5eb3ff"},
+    color=alt.Gradient(gradient="linear",
+        stops=[alt.GradientStop(color="#5eb3ff", offset=0),
+               alt.GradientStop(color="transparent", offset=1)],
+        x1=1, x2=1, y1=1, y2=0)
+).encode(
+    x=alt.X("Fecha:T", title="Semana"),
+    y=alt.Y("Demanda:Q", title="Unidades"),
+    tooltip=["Fecha:T", alt.Tooltip("Demanda:Q", format=".1f")]
+).properties(height=260, title="Serie histórica de demanda").interactive()
+st.altair_chart(area, use_container_width=True)
+
+# Top SKUs si se ven todos
+if col_sku_real and sku_sel == "__TODOS__":
+    top = (df_raw.assign(_v=pd.to_numeric(df_raw[col_valor], errors="coerce"))
+                 .groupby(col_sku_real)["_v"].sum()
+                 .nlargest(15).reset_index()
+                 .rename(columns={col_sku_real:"SKU","_v":"Total"}))
+    bar_top = alt.Chart(top).mark_bar(color="#c97bff").encode(
+        x=alt.X("Total:Q", title="Unidades totales"),
+        y=alt.Y("SKU:N", sort="-x", title=""),
+        tooltip=["SKU:N", alt.Tooltip("Total:Q", format=",.0f")]
+    ).properties(height=320, title="Top 15 SKUs por demanda total").interactive()
+    st.altair_chart(bar_top, use_container_width=True)
+
+if not run_btn:
+    st.info("Ajusta los parámetros en la barra lateral y presiona **Ejecutar análisis**.")
+    st.stop()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# NIVEL 1 — EXPLORADOR
+# ══════════════════════════════════════════════════════════════════════════════
+st.markdown('<span class="badge b1">Nivel 1 — Explorador</span>', unsafe_allow_html=True)
+st.markdown("### 🔍 Limpieza y EDA")
+
+arr_raw = ts["Demanda"].values.copy()
+n_nan   = int(np.isnan(arr_raw).sum())
+q1r, q3r = np.nanpercentile(arr_raw, 25), np.nanpercentile(arr_raw, 75)
+n_out   = int(((arr_raw < q1r-1.5*(q3r-q1r)) | (arr_raw > q3r+1.5*(q3r-q1r))).sum())
+
+c1,c2,c3,c4 = st.columns(4)
+for col_w, lbl, val in zip([c1,c2,c3,c4],
+    ["Semanas","NaN detectados","Outliers (IQR)","Semanas válidas"],
+    [len(ts), n_nan, n_out, len(ts)-n_nan]):
+    col_w.markdown(kpi(lbl, val), unsafe_allow_html=True)
+
+impute = st.selectbox("Método de imputación",
+    ["Forward Fill","Media simple","Mediana","Interpolación lineal"])
+
+ts_clean = ts.copy()
+ts_clean["Demanda"] = ts_clean["Demanda"].replace(0, np.nan)
+if   impute == "Forward Fill":       ts_clean["Demanda"] = ts_clean["Demanda"].ffill()
+elif impute == "Media simple":       ts_clean["Demanda"] = ts_clean["Demanda"].fillna(ts_clean["Demanda"].mean())
+elif impute == "Mediana":            ts_clean["Demanda"] = ts_clean["Demanda"].fillna(ts_clean["Demanda"].median())
+else:                                ts_clean["Demanda"] = ts_clean["Demanda"].interpolate()
+
+comp = pd.concat([ts.assign(Serie="Original"), ts_clean.assign(Serie="Limpia")])
+chart_comp = alt.Chart(comp).mark_line(opacity=.85).encode(
+    x=alt.X("Fecha:T", title="Semana"),
+    y=alt.Y("Demanda:Q", title="Unidades"),
+    color=alt.Color("Serie:N", scale=alt.Scale(
+        domain=["Original","Limpia"], range=["#4b5563","#4fffb0"])),
+    strokeDash=alt.StrokeDash("Serie:N", scale=alt.Scale(
+        domain=["Original","Limpia"], range=[[4,4],[0]])),
+    tooltip=["Fecha:T","Serie:N", alt.Tooltip("Demanda:Q",format=".1f")]
+).properties(height=250, title="Original vs. Limpia").interactive()
+st.altair_chart(chart_comp, use_container_width=True)
+
+c1,c2 = st.columns(2)
+c1.markdown(kpi("Media (limpio)",    f"{ts_clean['Demanda'].mean():.2f}"), unsafe_allow_html=True)
+c2.markdown(kpi("Desv. estándar",    f"{ts_clean['Demanda'].std():.2f}"),  unsafe_allow_html=True)
+st.markdown("---")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# NIVEL 2 — CONSTRUCTOR
+# ══════════════════════════════════════════════════════════════════════════════
+nivel2_mape = None
+if "2" in nivel or "3" in nivel:
+    st.markdown('<span class="badge b2">Nivel 2 — Constructor</span>', unsafe_allow_html=True)
+    st.markdown("### 📐 Holt-Winters + Forecast IC 90%")
+
+    arr   = ts_clean["Demanda"].values.astype(float)
+    dates = ts_clean["Fecha"].values
+
+    fitted_hw, lv, tr, sea = holt_winters(arr)
+    resid_hw  = arr - fitted_hw
+    mae_hw    = np.mean(np.abs(resid_hw))
+    mape_hw   = np.mean(np.abs(resid_hw / (arr + 1e-9))) * 100
+    nivel2_mape = mape_hw
+
+    c1,c2 = st.columns(2)
+    c1.markdown(kpi("MAE Holt-Winters",  f"{mae_hw:.2f}"),   unsafe_allow_html=True)
+    c2.markdown(kpi("MAPE Holt-Winters", f"{mape_hw:.2f}%"), unsafe_allow_html=True)
 
     # ── Histograma de residuos ────────────────────────────────────────────
-    resid_df = pd.DataFrame({"Residuo": residuals})
-    hist_chart = alt.Chart(resid_df).mark_bar(color="#5eb3ff", opacity=0.75).encode(
-        alt.X("Residuo:Q", bin=alt.Bin(maxbins=40), title="Residuo"),
-        alt.Y("count()", title="Frecuencia")
-    ).properties(height=180, title="Histograma de Residuos — Calidad del Ajuste").interactive()
-    st.altair_chart(hist_chart, use_container_width=True)
+    st.markdown("#### 📉 Histograma de Residuos — Calidad del Ajuste")
+    rdf = pd.DataFrame({"Residuo": resid_hw})
+    hist_hw = alt.Chart(rdf).mark_bar(color="#5eb3ff", opacity=.75).encode(
+        alt.X("Residuo:Q", bin=alt.Bin(maxbins=35), title="Residuo"),
+        alt.Y("count()", title="Frecuencia"),
+        tooltip=[alt.Tooltip("Residuo:Q", bin=True), "count()"]
+    ).properties(height=200, title="Distribución de residuos (centrada en 0 = buen ajuste)").interactive()
+    zero_rule = alt.Chart(pd.DataFrame({"x":[0]})).mark_rule(
+        color="#ff4b4b", strokeDash=[4,4], strokeWidth=2).encode(x="x:Q")
+    st.altair_chart(hist_hw + zero_rule, use_container_width=True)
 
-    # ── Gráfico interactivo con IC ─────────────────────────────────────────
-    hist_df = pd.DataFrame({
-        "Datetime": df_clean["Datetime"],
-        "Kwh": data,
-        "Tipo": "Histórico",
-        "IC_low": np.nan,
-        "IC_high": np.nan,
-    })
-    pred_df = pd.DataFrame({
-        "Datetime": future_dates,
-        "Kwh": future_preds,
-        "Tipo": "Forecast",
-        "IC_low": ic_low,
-        "IC_high": ic_high,
-    })
-    viz = pd.concat([hist_df, pred_df])
+    # ── Forecast IC 90% ───────────────────────────────────────────────────
+    z90     = 1.645
+    std_r   = resid_hw.std()
+    fut_hw  = future_hw(lv, tr, sea, forecast_n)
+    ic_lo   = fut_hw - z90 * std_r
+    ic_hi   = fut_hw + z90 * std_r
+    last_d  = pd.Timestamp(dates[-1])
+    fut_d   = pd.date_range(start=last_d, periods=forecast_n+1, freq="W")[1:]
 
-    base = alt.Chart(viz)
-    band = base.mark_area(opacity=0.2, color="#5eb3ff").encode(
-        x=alt.X("Datetime:T"),
-        y=alt.Y("IC_low:Q"),
-        y2=alt.Y2("IC_high:Q"),
-        tooltip=[alt.Tooltip("Datetime:T", title="Fecha"),
-                 alt.Tooltip("IC_low:Q", title="IC Inferior", format=".3f"),
-                 alt.Tooltip("IC_high:Q", title="IC Superior", format=".3f")]
-    )
-    lines = base.mark_line().encode(
-        x="Datetime:T",
-        y=alt.Y("Kwh:Q", title="Consumo (kWh)"),
+    h_plot = pd.DataFrame({"Fecha":pd.to_datetime(dates),"Valor":arr,"Tipo":"Histórico","IC_lo":np.nan,"IC_hi":np.nan})
+    p_plot = pd.DataFrame({"Fecha":fut_d,"Valor":fut_hw,"Tipo":"Forecast HW","IC_lo":ic_lo,"IC_hi":ic_hi})
+    viz    = pd.concat([h_plot, p_plot])
+
+    base  = alt.Chart(viz)
+    band  = base.mark_area(opacity=.15, color="#5eb3ff").encode(
+        x="Fecha:T", y="IC_lo:Q", y2="IC_hi:Q",
+        tooltip=[alt.Tooltip("Fecha:T",title="Semana"),
+                 alt.Tooltip("IC_lo:Q",format=".1f",title="IC Inf"),
+                 alt.Tooltip("IC_hi:Q",format=".1f",title="IC Sup")])
+    lines = base.mark_line(strokeWidth=2).encode(
+        x=alt.X("Fecha:T", title="Semana"),
+        y=alt.Y("Valor:Q",  title="Unidades"),
         color=alt.Color("Tipo:N", scale=alt.Scale(
-            domain=["Histórico", "Forecast"],
-            range=["#9ca3af", "#5eb3ff"]
-        )),
-        tooltip=[alt.Tooltip("Datetime:T", title="Fecha"),
-                 alt.Tooltip("Kwh:Q", title="Valor", format=".3f"),
-                 alt.Tooltip("Tipo:N", title="Serie")]
-    )
-    chart = (band + lines).properties(height=350, title="Forecast con Intervalo de Confianza 90%").interactive()
-    st.altair_chart(chart, use_container_width=True)
+            domain=["Histórico","Forecast HW"], range=["#9ca3af","#5eb3ff"])),
+        tooltip=["Fecha:T", alt.Tooltip("Valor:Q",format=".1f"), "Tipo:N"])
+    st.altair_chart((band+lines).properties(
+        height=300, title="Forecast Holt-Winters con IC 90%").interactive(),
+        use_container_width=True)
 
-    # ── Tabla de predicciones ─────────────────────────────────────────────
-    st.markdown("**Tabla de predicciones (semana, valor central, IC inferior, IC superior)**")
-    table = pd.DataFrame({
-        "Semana": [f"S+{i+1}" for i in range(n_steps)],
-        "Fecha": [d.strftime("%Y-%m-%d") for d in future_dates],
-        "Valor Central": future_preds.round(3),
-        "IC Inferior (90%)": ic_low.round(3),
-        "IC Superior (90%)": ic_high.round(3),
+    tabla_hw = pd.DataFrame({
+        "Semana":          [f"S+{i+1}" for i in range(forecast_n)],
+        "Fecha":           fut_d.strftime("%Y-%m-%d"),
+        "Valor central":   fut_hw.round(2),
+        "IC inferior 90%": ic_lo.round(2),
+        "IC superior 90%": ic_hi.round(2),
     })
-    st.dataframe(table, use_container_width=True, height=300)
-
-    return pred_df, mae, mape
+    st.dataframe(tabla_hw, use_container_width=True, height=260)
+    st.download_button("⬇️ Descargar forecast HW (.csv)",
+        data=tabla_hw.to_csv(index=False).encode(), file_name="forecast_hw.csv", mime="text/csv")
+    st.markdown("---")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# NIVEL 3 — ARQUITECTO: LSTM + Comparación de modelos + Log de anomalías
+# NIVEL 3 — ARQUITECTO
 # ══════════════════════════════════════════════════════════════════════════════
-def nivel_3(df_clean, seq_length, prediction_steps, hidden_size, epochs, nivel2_mape):
-    st.markdown('<span class="level-badge badge-3">Nivel 3 — Arquitecto</span>', unsafe_allow_html=True)
+if "3" in nivel:
+    st.markdown('<span class="badge b3">Nivel 3 — Arquitecto</span>', unsafe_allow_html=True)
     st.markdown("### 🏗️ LSTM + Comparación de Modelos + Anomalías")
 
-    data = df_clean["Kwh"].values
-    data_norm, mean, std = normalize_data(data)
+    arr   = ts_clean["Demanda"].values.astype(float)
+    dates = ts_clean["Fecha"].values
 
-    X, y = create_sequences(data_norm, seq_length)
-    X_t = torch.FloatTensor(X).view(-1, seq_length, 1)
-    y_t = torch.FloatTensor(y)
+    if len(arr) <= seq_length:
+        st.warning(f"Necesitas más de {seq_length} semanas. Reduce la secuencia LSTM en la barra lateral.")
+        st.stop()
+
+    arr_n, m, s = norm(arr)
+    X, y = make_seq(arr_n, seq_length)
+    Xt = torch.FloatTensor(X).view(-1, seq_length, 1)
+    yt = torch.FloatTensor(y)
 
     model = LSTMPredictor(hidden_size=hidden_size)
-    criterion = nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters())
+    opt   = torch.optim.Adam(model.parameters())
+    crit  = nn.MSELoss()
 
-    progress_bar = st.progress(0, text="Entrenando LSTM…")
-    train_losses = []
+    prog   = st.progress(0, text="Entrenando LSTM…")
+    losses = []
+    for ep in range(epochs):
+        model.train(); opt.zero_grad()
+        out  = model(Xt).squeeze()
+        loss = crit(out, yt)
+        loss.backward(); opt.step()
+        losses.append(loss.item())
+        prog.progress((ep+1)/epochs, text=f"Época {ep+1}/{epochs}  loss={loss.item():.5f}")
 
-    for epoch in range(epochs):
-        model.train()
-        optimizer.zero_grad()
-        outputs = model(X_t).squeeze()
-        loss = criterion(outputs, y_t)
-        loss.backward()
-        optimizer.step()
-        train_losses.append(loss.item())
-        progress_bar.progress((epoch + 1) / epochs, text=f"Época {epoch+1}/{epochs} — Loss: {loss.item():.5f}")
+    # Curva de pérdida
+    ldf = pd.DataFrame({"Época": range(1, epochs+1), "Loss": losses})
+    lc  = alt.Chart(ldf).mark_line(color="#c97bff", strokeWidth=1.5).encode(
+        x=alt.X("Época:Q"), y=alt.Y("Loss:Q", title="MSE Loss"),
+        tooltip=["Época:Q", alt.Tooltip("Loss:Q", format=".6f")]
+    ).properties(height=180, title="Curva de entrenamiento LSTM").interactive()
+    st.altair_chart(lc, use_container_width=True)
 
-    # ── Ajuste sobre histórico ────────────────────────────────────────────
+    # Ajuste sobre histórico
     model.eval()
     with torch.no_grad():
-        fitted_norm = model(X_t).squeeze().numpy()
-    fitted = denormalize_data(fitted_norm, mean, std)
-    actual = data[seq_length:]
+        fit_n = model(Xt).squeeze().numpy()
+    fit        = denorm(fit_n, m, s)
+    act        = arr[seq_length:]
+    resid_lstm = act - fit
+    mae_lstm   = np.mean(np.abs(resid_lstm))
+    mape_lstm  = np.mean(np.abs(resid_lstm / (act + 1e-9))) * 100
 
-    residuals_lstm = actual - fitted
-    mae_lstm = np.mean(np.abs(residuals_lstm))
-    mape_lstm = np.mean(np.abs(residuals_lstm / (actual + 1e-9))) * 100
+    # Histograma residuos LSTM
+    st.markdown("#### 📉 Histograma de Residuos LSTM")
+    rdf2 = pd.DataFrame({"Residuo": resid_lstm})
+    h2   = alt.Chart(rdf2).mark_bar(color="#c97bff", opacity=.75).encode(
+        alt.X("Residuo:Q", bin=alt.Bin(maxbins=35)),
+        alt.Y("count()", title="Frecuencia"),
+        tooltip=[alt.Tooltip("Residuo:Q", bin=True), "count()"]
+    ).properties(height=180, title="Residuos LSTM").interactive()
+    z2 = alt.Chart(pd.DataFrame({"x":[0]})).mark_rule(
+        color="#ff4b4b", strokeDash=[4,4], strokeWidth=2).encode(x="x:Q")
+    st.altair_chart(h2+z2, use_container_width=True)
 
-    # ── Comparación de modelos ────────────────────────────────────────────
-    st.markdown("#### 📊 Comparación de Modelos (por MAPE)")
-    model_data = pd.DataFrame({
-        "Modelo": ["Holt-Winters", "LSTM"],
-        "MAPE (%)": [nivel2_mape, mape_lstm],
-        "MAE": [None, mae_lstm],  # solo para mostrar en tabla
-    })
-    best_model = model_data.loc[model_data["MAPE (%)"].idxmin(), "Modelo"]
-    st.info(f"✅ Mejor modelo por MAPE: **{best_model}** ({model_data['MAPE (%)'].min():.2f}%)")
+    # Comparación de modelos
+    st.markdown("#### 📊 Comparación de Modelos por MAPE")
+    hw_val = nivel2_mape if nivel2_mape is not None else 999
+    cmp = pd.DataFrame({"Modelo":["Holt-Winters","LSTM"], "MAPE (%)": [hw_val, mape_lstm]})
+    best = cmp.loc[cmp["MAPE (%)"].idxmin(), "Modelo"]
+    st.info(f"✅ Mejor modelo: **{best}** — MAPE = {cmp['MAPE (%)'].min():.2f}%")
 
-    bar = alt.Chart(model_data).mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
-        x=alt.X("Modelo:N", title="Modelo"),
-        y=alt.Y("MAPE (%):Q", title="MAPE (%)"),
-        color=alt.condition(
-            alt.datum.Modelo == best_model,
-            alt.value("#c97bff"),
-            alt.value("#4b5563")
-        ),
+    cbar = alt.Chart(cmp).mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
+        x=alt.X("Modelo:N"),
+        y=alt.Y("MAPE (%):Q"),
+        color=alt.condition(alt.datum.Modelo == best,
+                            alt.value("#c97bff"), alt.value("#374151")),
         tooltip=["Modelo:N", alt.Tooltip("MAPE (%):Q", format=".2f")]
-    ).properties(height=220)
-    st.altair_chart(bar, use_container_width=True)
+    ).properties(height=200)
+    st.altair_chart(cbar, use_container_width=True)
 
-    # ── Predicción LSTM ───────────────────────────────────────────────────
-    last_sequence = torch.FloatTensor(data_norm[-seq_length:]).view(-1, 1)
-    predictions = predict_future(model, last_sequence, prediction_steps, mean, std)
+    c1, c2 = st.columns(2)
+    c1.markdown(kpi("MAE LSTM",  f"{mae_lstm:.2f}"),  unsafe_allow_html=True)
+    c2.markdown(kpi("MAPE LSTM", f"{mape_lstm:.2f}%"), unsafe_allow_html=True)
 
-    last_date = df_clean["Datetime"].iloc[-1]
-    freq = pd.infer_freq(df_clean["Datetime"]) or "W"
-    future_dates = pd.date_range(start=last_date, periods=prediction_steps + 1, freq=freq)[1:]
+    # Predicción futura
+    last_seq  = torch.FloatTensor(arr_n[-seq_length:]).view(-1, 1)
+    preds     = forecast_lstm(model, last_seq, forecast_n, m, s)
+    last_d    = pd.Timestamp(dates[-1])
+    fut_d     = pd.date_range(start=last_d, periods=forecast_n+1, freq="W")[1:]
 
-    hist_df = pd.DataFrame({"Datetime": df_clean["Datetime"], "Kwh": data, "Tipo": "Histórico"})
-    pred_df = pd.DataFrame({"Datetime": future_dates, "Kwh": predictions, "Tipo": "Predicción LSTM"})
-    viz = pd.concat([hist_df, pred_df])
+    h_df = pd.DataFrame({"Fecha":pd.to_datetime(dates), "Demanda":arr,  "Tipo":"Histórico"})
+    p_df = pd.DataFrame({"Fecha":fut_d,                 "Demanda":preds, "Tipo":"Predicción LSTM"})
+    viz2 = pd.concat([h_df, p_df])
 
-    chart = alt.Chart(viz).mark_line().encode(
-        x=alt.X("Datetime:T", title="Fecha"),
-        y=alt.Y("Kwh:Q", title="Consumo (kWh)"),
+    lc2 = alt.Chart(viz2).mark_line(strokeWidth=2).encode(
+        x=alt.X("Fecha:T", title="Semana"),
+        y=alt.Y("Demanda:Q", title="Unidades"),
         color=alt.Color("Tipo:N", scale=alt.Scale(
-            domain=["Histórico", "Predicción LSTM"],
-            range=["#9ca3af", "#c97bff"]
-        )),
-        tooltip=["Datetime:T", alt.Tooltip("Kwh:Q", format=".3f"), "Tipo:N"]
-    ).properties(height=300, title="Predicción LSTM").interactive()
-    st.altair_chart(chart, use_container_width=True)
+            domain=["Histórico","Predicción LSTM"], range=["#9ca3af","#c97bff"])),
+        tooltip=["Fecha:T", alt.Tooltip("Demanda:Q",format=".1f"), "Tipo:N"]
+    ).properties(height=300, title="Predicción LSTM vs Histórico").interactive()
+    st.altair_chart(lc2, use_container_width=True)
 
-    # ── Tabla de predicciones LSTM ────────────────────────────────────────
     pred_table = pd.DataFrame({
-        "Paso": [f"S+{i+1}" for i in range(prediction_steps)],
-        "Fecha": [d.strftime("%Y-%m-%d") for d in future_dates],
-        "Predicción LSTM (kWh)": predictions.round(4),
+        "Semana":            [f"S+{i+1}" for i in range(forecast_n)],
+        "Fecha":             fut_d.strftime("%Y-%m-%d"),
+        "Predicción LSTM":   preds.round(2),
     })
-    st.dataframe(pred_table, use_container_width=True, height=280)
+    st.dataframe(pred_table, use_container_width=True, height=260)
+    st.download_button("⬇️ Descargar predicciones LSTM (.csv)",
+        data=pred_table.to_csv(index=False).encode(), file_name="pred_lstm.csv", mime="text/csv")
 
-    # ── Log de anomalías ──────────────────────────────────────────────────
-    st.markdown("#### 🚨 Log de Anomalías Detectadas")
-    q1, q3 = np.percentile(data, 25), np.percentile(data, 75)
-    iqr = q3 - q1
-    lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+    # Log de anomalías
+    st.markdown("#### 🚨 Log de Anomalías — Tipo de Semana y Valor Original")
+    anom_df, lo, hi = detect_anomalies(arr, dates)
 
-    anom_mask = (data < lower) | (data > upper)
-    anom_df = df_clean[anom_mask].copy()
-    anom_df["Tipo"] = np.where(data[anom_mask] < lower, "Valor bajo", "Valor alto")
-    anom_df = anom_df.rename(columns={"Kwh": "Valor Original"})
-    anom_df["Límite inferior"] = round(lower, 3)
-    anom_df["Límite superior"] = round(upper, 3)
+    ca, cb = st.columns(2)
+    ca.markdown(kpi("Límite inferior", f"{lo:.2f}"), unsafe_allow_html=True)
+    cb.markdown(kpi("Límite superior", f"{hi:.2f}"), unsafe_allow_html=True)
 
-    if len(anom_df) == 0:
+    if anom_df.empty:
         st.success("No se detectaron anomalías en el dataset.")
     else:
         st.warning(f"Se detectaron **{len(anom_df)}** anomalías.")
-        st.dataframe(anom_df[["Datetime", "Valor Original", "Tipo", "Límite inferior", "Límite superior"]].reset_index(drop=True),
-                     use_container_width=True, height=260)
+        st.dataframe(anom_df, use_container_width=True, height=280)
 
-    # ── Descarga de predicciones ──────────────────────────────────────────
-    csv_bytes = pred_table.to_csv(index=False).encode("utf-8")
-    st.download_button("⬇️ Descargar predicciones LSTM (.csv)", data=csv_bytes,
-                       file_name="predicciones_lstm.csv", mime="text/csv")
+        ts_p    = pd.DataFrame({"Fecha":pd.to_datetime(dates), "Demanda":arr})
+        anom_p  = ts_p[(arr < lo)|(arr > hi)]
+        base_l  = alt.Chart(ts_p).mark_line(color="#9ca3af").encode(x="Fecha:T", y="Demanda:Q")
+        anom_pt = alt.Chart(anom_p).mark_point(color="#ff4b4b", size=90, filled=True).encode(
+            x="Fecha:T", y="Demanda:Q",
+            tooltip=[alt.Tooltip("Fecha:T",title="Semana"), alt.Tooltip("Demanda:Q",format=".1f")])
+        lo_r = alt.Chart(pd.DataFrame({"y":[lo]})).mark_rule(color="#ff4b4b",strokeDash=[4,4]).encode(y="y:Q")
+        hi_r = alt.Chart(pd.DataFrame({"y":[hi]})).mark_rule(color="#ff4b4b",strokeDash=[4,4]).encode(y="y:Q")
+        st.altair_chart((base_l+anom_pt+lo_r+hi_r).properties(
+            height=250, title="Serie con anomalías marcadas (●)").interactive(),
+            use_container_width=True)
 
-    return pred_table
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# INTERFAZ PRINCIPAL
-# ══════════════════════════════════════════════════════════════════════════════
-st.title("📊 Predicción de Demanda — Series Temporales")
-st.caption("Explorador  ·  Constructor  ·  Arquitecto")
-
-# ── Sidebar ────────────────────────────────────────────────────────────────
-st.sidebar.header("📁 Datos")
-uploaded_file = st.sidebar.file_uploader("Cargar archivo (CSV o XLSX)", type=["csv", "xlsx", "xls"])
-
-# Selector de hoja para XLSX
-sheet_name = None
-if uploaded_file is not None and uploaded_file.name.lower().endswith((".xlsx", ".xls")):
-    try:
-        raw = uploaded_file.read()
-        uploaded_file.seek(0)  # resetear el cursor
-        xf = pd.ExcelFile(io.BytesIO(raw), engine="openpyxl")
-        sheets = xf.sheet_names
-        if len(sheets) > 1:
-            sheet_name = st.sidebar.selectbox("Hoja del archivo Excel", sheets)
-        else:
-            sheet_name = sheets[0]
-    except Exception:
-        sheet_name = 0
-
-# Nivel activo
-nivel = st.sidebar.radio("Nivel de análisis", ["Nivel 1 — Explorador", "Nivel 2 — Constructor", "Nivel 3 — Arquitecto"])
-
-st.sidebar.markdown("---")
-st.sidebar.header("⚙️ Parámetros")
-
-# Parámetros Nivel 2
-forecast_weeks = st.sidebar.slider("Semanas a predecir (N2)", min_value=4, max_value=52, value=12)
-
-# Parámetros Nivel 3
-seq_length  = st.sidebar.slider("Longitud de secuencia LSTM", min_value=4, max_value=52, value=12)
-hidden_size = st.sidebar.slider("Neuronas capa oculta", min_value=10, max_value=150, value=50)
-epochs      = st.sidebar.slider("Épocas de entrenamiento", min_value=10, max_value=300, value=80)
-
-train_btn = st.sidebar.button("🚀 Ejecutar Análisis", type="primary")
-
-# ── Instrucciones cuando no hay archivo ──────────────────────────────────
-if uploaded_file is None:
-    st.info("👆 Carga un archivo CSV o XLSX para comenzar.")
-    st.markdown("""
-    **Formato esperado:**
-    | Datetime | Kwh |
-    |---|---|
-    | 2023-01-01 00:00 | 245.3 |
-    | 2023-01-01 01:00 | 238.7 |
-
-    *Se detectan automáticamente columnas con nombres alternativos (Time, Fecha, Value, Consumo, etc.)*
-    """)
-    st.stop()
-
-# ── Carga ──────────────────────────────────────────────────────────────────
-df = load_data(uploaded_file, sheet_name=sheet_name)
-if df is None:
-    # Último recurso: selector manual de columnas
-    st.warning("Selección manual de columnas:")
-    try:
-        uploaded_file.seek(0)
-        raw2 = uploaded_file.read()
-        fname2 = uploaded_file.name.lower()
-        if fname2.endswith((".xlsx", ".xls")):
-            df_raw = pd.read_excel(io.BytesIO(raw2), sheet_name=sheet_name or 0, engine="openpyxl")
-        else:
-            df_raw = pd.read_csv(io.BytesIO(raw2))
-        st.dataframe(df_raw.head(5), use_container_width=True)
-        cols = list(df_raw.columns)
-        col_time = st.selectbox("Columna de fecha/tiempo", cols, key="manual_time")
-        col_val  = st.selectbox("Columna de consumo (numérica)", cols, key="manual_val")
-        if st.button("Aplicar selección manual"):
-            df_raw = df_raw.rename(columns={col_time: "Datetime", col_val: "Kwh"})
-            df_raw["Datetime"] = pd.to_datetime(df_raw["Datetime"])
-            df = df_raw[["Datetime", "Kwh"]].dropna().sort_values("Datetime").reset_index(drop=True)
-            st.success(f"Cargados {len(df):,} registros correctamente.")
-        else:
-            st.stop()
-    except Exception as e2:
-        st.error(f"No se pudo leer el archivo: {e2}")
-        st.stop()
-
-st.success(f"✅ Dataset cargado: **{len(df):,} registros** | {df['Datetime'].min().date()} → {df['Datetime'].max().date()}")
-with st.expander("Vista previa de los datos"):
-    st.dataframe(df.head(20), use_container_width=True)
-
-if not train_btn:
-    st.info("Ajusta los parámetros en la barra lateral y presiona **Ejecutar Análisis**.")
-    st.stop()
-
-# ── Ejecución por nivel ────────────────────────────────────────────────────
-df_clean = nivel_1(df)
-st.markdown("---")
-
-nivel2_mape = None
-if "Constructor" in nivel or "Arquitecto" in nivel:
-    result = nivel_2(df_clean, forecast_weeks)
-    if result[0] is not None:
-        _, nivel2_mae, nivel2_mape = result
-    st.markdown("---")
-
-if "Arquitecto" in nivel:
-    if nivel2_mape is None:
-        # Calcular mape básico si se saltó nivel 2
-        result = nivel_2(df_clean, forecast_weeks)
-        if result[0] is not None:
-            _, nivel2_mae, nivel2_mape = result
-        nivel2_mape = nivel2_mape or 0.0
-
-    nivel_3(df_clean, seq_length, forecast_weeks, hidden_size, epochs, nivel2_mape)
-
-# ── Sidebar info ───────────────────────────────────────────────────────────
-st.sidebar.markdown("""
----
-**Niveles:**
-- 🟢 **Nivel 1** — EDA, NaN, outliers, imputación
-- 🔵 **Nivel 2** — Holt-Winters, MAE/MAPE, IC 90%, tabla forecast
-- 🟣 **Nivel 3** — LSTM, comparación modelos, log anomalías
-""")
+        st.download_button("⬇️ Descargar log de anomalías (.csv)",
+            data=anom_df.to_csv(index=False).encode(), file_name="anomalias.csv", mime="text/csv")
