@@ -13,7 +13,12 @@ except ImportError:
     _OPENPYXL_OK = False
 
 # ══════════════════════════════════════════════════════════════════════════════
-st.set_page_config(page_title="Predicción de Demanda", page_icon="📦", layout="wide")
+st.set_page_config(
+    page_title="Predicción de Demanda",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
 st.markdown("""
 <style>
